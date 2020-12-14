@@ -87,6 +87,9 @@ public class SpotProtocolDecoder extends BaseHttpProtocolDecoder {
         if (jsonContains(json, "longitude")) {
             position.setLongitude(getJsonDouble(json, "longitude"));
         }
+        if(position.getLatitude() != 0 && position.getLongitude() != 0) {
+            position.setValid(true);
+        }
 
         if (jsonContains(json, "messageType")) {
             position.set(Position.KEY_EVENT, json.getString("messageType"));
