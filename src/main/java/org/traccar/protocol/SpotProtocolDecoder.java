@@ -15,88 +15,108 @@
  */
 package org.traccar.protocol;
 
-import com.fasterxml.jackson.databind.util.ByteBufferBackedInputStream;
 import io.netty.channel.Channel;
-import io.netty.handler.codec.http.FullHttpRequest;
 import io.netty.handler.codec.http.HttpResponseStatus;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.traccar.BaseHttpProtocolDecoder;
 import org.traccar.DeviceSession;
 import org.traccar.Protocol;
 import org.traccar.helper.DateUtil;
 import org.traccar.model.Position;
-import org.w3c.dom.Document;
-import org.w3c.dom.Node;
-import org.w3c.dom.NodeList;
 
-import javax.xml.parsers.DocumentBuilder;
-import javax.xml.parsers.DocumentBuilderFactory;
-import javax.xml.parsers.ParserConfigurationException;
-import javax.xml.xpath.XPath;
-import javax.xml.xpath.XPathConstants;
-import javax.xml.xpath.XPathExpression;
-import javax.xml.xpath.XPathExpressionException;
-import javax.xml.xpath.XPathFactory;
+import javax.json.*;
+import java.io.StringReader;
 import java.net.SocketAddress;
-import java.util.LinkedList;
-import java.util.List;
+import java.net.URLDecoder;
+import java.util.Date;
 
 public class SpotProtocolDecoder extends BaseHttpProtocolDecoder {
 
-    private final DocumentBuilder documentBuilder;
-    private final XPath xPath;
-    private final XPathExpression messageExpression;
+    private static final Logger LOGGER = LoggerFactory.getLogger(SpotProtocolDecoder.class);
 
     public SpotProtocolDecoder(Protocol protocol) {
         super(protocol);
-        try {
-            DocumentBuilderFactory builderFactory = DocumentBuilderFactory.newInstance();
-            builderFactory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
-            builderFactory.setFeature("http://xml.org/sax/features/external-general-entities", false);
-            builderFactory.setFeature("http://xml.org/sax/features/external-parameter-entities", false);
-            builderFactory.setFeature("http://apache.org/xml/features/nonvalidating/load-external-dtd", false);
-            builderFactory.setXIncludeAware(false);
-            builderFactory.setExpandEntityReferences(false);
-            documentBuilder = builderFactory.newDocumentBuilder();
-            xPath = XPathFactory.newInstance().newXPath();
-            messageExpression = xPath.compile("//messageList/message");
-        } catch (ParserConfigurationException | XPathExpressionException e) {
-            throw new RuntimeException(e);
-        }
     }
 
     @Override
     protected Object decode(
             Channel channel, SocketAddress remoteAddress, Object msg) throws Exception {
-
-        FullHttpRequest request = (FullHttpRequest) msg;
-
-        Document document = documentBuilder.parse(new ByteBufferBackedInputStream(request.content().nioBuffer()));
-        NodeList nodes = (NodeList) messageExpression.evaluate(document, XPathConstants.NODESET);
-
-        List<Position> positions = new LinkedList<>();
-
-        for (int i = 0; i < nodes.getLength(); i++) {
-            Node node = nodes.item(i);
-            DeviceSession deviceSession = getDeviceSession(channel, remoteAddress, xPath.evaluate("esnName", node));
-            if (deviceSession != null) {
-
-                Position position = new Position(getProtocolName());
-                position.setDeviceId(deviceSession.getDeviceId());
-
-                position.setValid(true);
-                position.setTime(DateUtil.parseDate(xPath.evaluate("timestamp", node)));
-                position.setLatitude(Double.parseDouble(xPath.evaluate("latitude", node)));
-                position.setLongitude(Double.parseDouble(xPath.evaluate("longitude", node)));
-
-                position.set(Position.KEY_EVENT, xPath.evaluate("messageType", node));
-
-                positions.add(position);
-
+        JsonObject json;
+        if (msg instanceof String) {
+            String content = (String) msg;
+            if (!content.startsWith("{")) {
+                content = URLDecoder.decode(content.split("=")[0], "UTF-8");
             }
+            json = Json.createReader(new StringReader(content)).readObject();
+        } else if (msg instanceof JsonObject) {
+            json = (JsonObject) msg;
+        } else {
+            LOGGER.warn("Unknown message type: " + msg.getClass() + " : " + msg.toString());
+            sendResponse(channel, HttpResponseStatus.BAD_REQUEST);
+            return null;
+        }
+
+        String deviceId;
+        if (jsonContains(json, "esn")) {
+            deviceId = json.getString("esn");
+        } else {
+            LOGGER.warn("No esn provided");
+            sendResponse(channel, HttpResponseStatus.BAD_REQUEST);
+            return null;
+        }
+
+        DeviceSession deviceSession = getDeviceSession(channel, remoteAddress, deviceId);
+        if (deviceSession == null) {
+            sendResponse(channel, HttpResponseStatus.BAD_REQUEST);
+            return null;
+        }
+
+        Position position = new Position(getProtocolName());
+        position.setDeviceId(deviceSession.getDeviceId());
+
+        if (jsonContains(json, "timestamp")) {
+            position.setTime(DateUtil.parseDate(json.getString("timestamp")));
+        } else {
+            position.setTime(new Date());
+        }
+
+        if (jsonContains(json, "latitude")) {
+            position.setLatitude(getJsonDouble(json, "latitude"));
+        }
+        if (jsonContains(json, "longitude")) {
+            position.setLongitude(getJsonDouble(json, "longitude"));
+        }
+
+        if (jsonContains(json, "messageType")) {
+            position.set(Position.KEY_EVENT, json.getString("messageType"));
         }
 
         sendResponse(channel, HttpResponseStatus.OK);
-        return positions;
+        return position;
     }
 
+    private boolean jsonContains(JsonObject json, String key) {
+        if (json.containsKey(key)) {
+            JsonValue value = json.get(key);
+            if (value.getValueType() == JsonValue.ValueType.STRING) {
+                return !((JsonString) value).getString().equals("null");
+            } else {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private double getJsonDouble(JsonObject json, String key) {
+        JsonValue value = json.get(key);
+        if (value != null) {
+            if (value.getValueType() == JsonValue.ValueType.NUMBER) {
+                return ((JsonNumber) value).doubleValue();
+            } else if (value.getValueType() == JsonValue.ValueType.STRING) {
+                return Double.parseDouble(((JsonString) value).getString());
+            }
+        }
+        return 0;
+    }
 }
